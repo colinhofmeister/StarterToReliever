@@ -1,0 +1,83 @@
+---
+title: "Reds"
+author: "Colin Hofmeister"
+date: "2024-01-22"
+output: html_document
+---
+```{r}
+
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+setwd("C:/Users/Colin/OneDrive/Pictures/2024 Hackathon")
+savant <- read_csv("savant_pitch_level.csv")
+fangraphs <- read_csv("fangraphs_season_level.csv")
+```
+
+
+
+```{r}
+starters <- savant %>% filter(sp_indicator==1) %>% group_by(player_name, pitcher) %>% summarise(num_pitches = n())
+
+starters <- starters[starters$num_pitches > 1000,]
+
+qualified <- savant  %>% filter(pitcher %in% starters$pitcher)
+```
+
+```{r}
+first_15 <- qualified %>% filter(pitch_number_appearance < 15)
+rest <- qualified %>% filter(pitch_number_appearance > 15)
+
+first_15 <- first_15 %>% group_by(pitcher,player_name) %>% 
+  summarise(first15_woba = sum(woba_value,na.rm = TRUE)/ sum(woba_denom,na.rm = TRUE))
+
+rest <- rest %>% group_by(pitcher,player_name) %>% 
+  summarise(rest_woba = sum(woba_value,na.rm = TRUE)/ sum(woba_denom,na.rm = TRUE))
+
+total <- merge(first_15,rest, by=c("pitcher","player_name"))
+
+total <- total %>% 
+  mutate(rest_sub_first15_woba = rest_woba-first15_woba) %>% 
+  arrange(-rest_sub_first15_woba)
+top <- head(total, 100)
+
+top$player_name <- reorder(top$player_name, -top$rest_sub_first15_woba)
+
+write.csv(top, "top_first_15.csv")
+
+avg <- total %>% 
+  filter(!is.na(first15_woba)) %>% 
+  mutate(first15_woba = as.numeric(first15_woba))
+
+  F15mean_woba = mean(total$first15_woba)
+  F15mean_woba
+
+avgr <- total %>% 
+  filter(!is.na(rest_woba)) %>% 
+  mutate(rest_woba = as.numeric(rest_woba))
+
+  Rmean_woba = mean(total$rest_woba)
+  Rmean_woba
+```
+
+average first15_woba = 0.338629879
+average rest_woba = 0.330754093
+
+```{r}
+ggplot() +
+  geom_point(data = total, aes(x = first15_woba, y = rest_woba)) +
+  geom_text_repel(data = subset(total, 
+                               abs(scale(first15_woba)) > 2 | abs(scale(rest_woba)) > 2.5),
+                  aes(x = first15_woba, y = rest_woba, label = player_name),
+                  vjust = -0.3, hjust = 0.3) + 
+  labs(x = "wOBA First 15 Pitches", 
+       y = "wOBA After 15 Pitches", 
+       title = "Scatter Plot of wOBA First 15 Pitches of an Outing vs Rest of the Outing") +
+  theme_minimal() +
+  geom_hline(yintercept = .320, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = .320, linetype = "dashed", color = "black") 
+
+```
+
+
+
