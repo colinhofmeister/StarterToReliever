@@ -1,0 +1,1059 @@
+---
+title: "Reds_Final_Code"
+author: "Villanova Sports Analytics Club"
+date: "2024-02-02"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(xgboost)
+library(caret)
+library(hrbrthemes) 
+library(egg)
+library(ggpubr)
+
+fangraphs <- read_csv("./fangraphs_season_level.csv")
+savant <- read_csv("./savant_pitch_level.csv")
+
+
+```
+
+
+```{r}
+savant$LHB <- ifelse(savant$stand == "L", 1,0)
+savant$RHB <- ifelse(savant$stand == "R", 1,0)
+
+
+starters <- savant %>% filter(sp_indicator==1) %>% group_by(player_name, pitcher) %>% summarise(num_pitches = n())
+
+#Filtering to Qualified Pitchers
+starters <- starters[starters$num_pitches > 1500,]
+
+qualified <- savant  %>% filter(pitcher %in% starters$pitcher)
+
+```
+
+calculating woba against for starters first time vs. multiple times through the order
+```{r}
+first_time <- qualified %>% filter(times_faced == 1)
+multiple_time <- qualified %>% filter(times_faced >1)
+
+first_time <- first_time %>% group_by(pitcher,player_name) %>% 
+  summarise(num_pitches_first = n(), 
+            first_woba = sum(woba_value,na.rm = TRUE)/ sum(woba_denom,na.rm = TRUE))
+
+multiple_time <- multiple_time %>% group_by(pitcher,player_name) %>% 
+  summarise(num_pitches_multiple = n(),
+            multiple_woba = sum(woba_value,na.rm = TRUE)/ sum(woba_denom,na.rm = TRUE))
+
+first_and_multiple <- merge(first_time,multiple_time, by=c("pitcher","player_name"))
+
+first_and_multiple <- first_and_multiple %>% 
+  mutate(first_sub_multiple_woba = first_woba-multiple_woba) %>% 
+  arrange(-first_sub_multiple_woba)
+
+#MEAN
+avg_first_sub_multiple_woba <- mean(first_and_multiple$first_sub_multiple_woba)
+
+f_m_largest <- first_and_multiple %>% select(pitcher,
+                                             player_name,
+                                             first_woba,
+                                             multiple_woba,
+                                             first_sub_multiple_woba) %>% head(100) 
+
+f_m_largest$player_name <- reorder(f_m_largest$player_name, -f_m_largest$first_sub_multiple_woba)
+```
+
+calculating woba against for LHB and RHBs
+```{r}
+left <- qualified %>% filter(LHB == 1) %>% 
+  group_by(player_name,pitcher, LHB) %>% 
+  summarise(num_pitches_against_LHB = n(), 
+            Lwoba = sum(woba_value,na.rm = TRUE)/ sum(woba_denom,na.rm = TRUE))
+
+right <- qualified %>% filter(RHB == 1) %>% 
+  group_by(player_name,pitcher, RHB) %>% 
+  summarise(num_pitches_against_RHB = n(), 
+            Rwoba = sum(woba_value,na.rm = TRUE)/ sum(woba_denom,na.rm = TRUE))
+
+left_and_right <- merge(left,right, by=c("pitcher","player_name"))
+
+left_and_right <- left_and_right %>% 
+  mutate(left_right_woba = Lwoba-Rwoba) %>% 
+  arrange(-left_right_woba)
+
+#MEAN
+mean_L_vs_R_woba <- mean(left_and_right$left_right_woba)
+
+L_R_Largest <- left_and_right %>% 
+  mutate(left_right_woba = abs(Lwoba-Rwoba)) %>% 
+  arrange(-left_right_woba)
+
+L_R_Largest <- L_R_Largest %>% select(pitcher, player_name, Lwoba, Rwoba, left_right_woba) %>% head(100)
+
+ L_R_Largest$player_name <- reorder(L_R_Largest$player_name, -L_R_Largest$left_right_woba)
+
+```
+
+Graphing wOBAs against lefties and righties
+```{r}
+ggplot() +
+  geom_point(data = left_and_right, aes(x = Lwoba, y = Rwoba)) +
+  geom_text_repel(data = subset(left_and_right, 
+                                left_right_woba > 0.100 | left_right_woba < -0.100 ),
+                  aes(x = Lwoba, y = Rwoba, label = player_name),
+                  vjust = -0.5, hjust = 0.5) +
+  labs(x = "wOBA Against L", 
+       y = "wOBA Against R", 
+       title = "wOBA Against Lefties vs Righties",
+       subtitle = "For Qualified Starting Pitchers Since 2021") +
+  theme_minimal() +
+  # Add custom axes
+  geom_hline(yintercept = .320, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = .320, linetype = "dashed", color = "black") +
+  theme(plot.title = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(color = "grey30"),
+      axis.title = element_text(face = "bold"))
+```
+
+wOBAs 1st time vs multiple times through lineup
+```{r}
+ggplot() +
+  geom_point(data = first_and_multiple, aes(x = first_woba, y = multiple_woba)) +
+  geom_text_repel(data = subset(first_and_multiple, 
+                               abs(scale(first_sub_multiple_woba)) > 2.3),
+                  aes(x = first_woba, y = multiple_woba, label = player_name),
+                  vjust = -0.5, hjust = 0.5) + 
+  labs(x = "wOBA 1st Time Through Lineup", 
+       y = "Woba 2nd+Time Through Lineup", 
+       title = "wOBA Against 1st Time Through Lineup vs 2nd+ Time Through Lineup",
+       subtitle = "For Qualified Starting Pitchers Since 2021") +
+  theme_minimal() +
+  geom_hline(yintercept = .320, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = .320, linetype = "dashed", color = "black") +
+  theme(plot.title = element_text(face = "bold", size = 12),
+        plot.subtitle = element_text(color = "grey30"),
+        axis.title = element_text(face = "bold"))
+```
+
+
+
+```{r}
+starters <- savant %>% filter(sp_indicator==1) %>% group_by(player_name, pitcher) %>% summarise(num_pitches = n())
+
+starters <- starters[starters$num_pitches > 1000,]
+
+qualified <- savant  %>% filter(pitcher %in% starters$pitcher)
+```
+
+
+Calculating wOBA against for first 15 pitches vs rest of outing
+```{r}
+first_15 <- qualified %>% filter(pitch_number_appearance < 15)
+rest <- qualified %>% filter(pitch_number_appearance > 15)
+
+first_15 <- first_15 %>% group_by(pitcher,player_name) %>% 
+  summarise(first15_woba = sum(woba_value,na.rm = TRUE)/ sum(woba_denom,na.rm = TRUE))
+
+rest <- rest %>% group_by(pitcher,player_name) %>% 
+  summarise(rest_woba = sum(woba_value,na.rm = TRUE)/ sum(woba_denom,na.rm = TRUE))
+
+total <- merge(first_15,rest, by=c("pitcher","player_name"))
+
+total <- total %>% 
+  mutate(rest_sub_first15_woba = rest_woba-first15_woba) %>% 
+  arrange(-rest_sub_first15_woba)
+
+top_first_15 <- head(total, 100)
+
+top_first_15$player_name <- reorder(top_first_15$player_name, -top_first_15$rest_sub_first15_woba)
+
+
+avg2 <- total %>% 
+  filter(!is.na(rest_sub_first15_woba)) %>% 
+  mutate(rest_sub_first15_woba = as.numeric(rest_sub_first15_woba))
+
+  mean_rest_sub_first15_woba = mean(avg2$rest_sub_first15_woba)
+  
+  
+  
+
+```
+
+average first15_woba = 0.338629879
+average rest_woba = 0.330754093
+
+Graphing first 15 pitch woba vs rest of game woba
+
+```{r}
+ggplot() +
+  geom_point(data = total, aes(x = first15_woba, y = rest_woba)) +
+  geom_text_repel(data = subset(total, 
+                               abs(scale(first15_woba)) > 2.5 | abs(scale(rest_woba)) > 2.5),
+                  aes(x = first15_woba, y = rest_woba, label = player_name),
+                  vjust = -0.3, hjust = 0.3) + 
+  labs(x = "wOBA First 15 Pitches", 
+       y = "wOBA After 15 Pitches", 
+       title = "Scatter Plot of wOBA First 15 Pitches of an Outing vs Rest of the Outing") +
+  theme_minimal() +
+  geom_hline(yintercept = .320, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = .320, linetype = "dashed", color = "black") 
+
+```
+
+
+Look at how their release speed, horz movement, vert movement, and spin rate is in the pitchers first half of pitch count is compared to last half of pitch count.
+```{r}
+
+#Get only pitches that were thrown by starting pitchers who have thrown over 1000 pitches. Then group by pitcher and game date, create new variable called pitchNum which represents what pitch in the game that respective pitch was.
+savant <- savant %>%
+  group_by(player_name,pitcher) %>% 
+  mutate(total_pitches=n()) %>% 
+  ungroup() %>% 
+  filter(sp_indicator==1,total_pitches>=1500) %>% 
+  group_by(player_name, pitcher, game_date) %>%
+  arrange(game_date) %>%
+  mutate(PitchNum = row_number())
+  
+
+# Create a dataframe for the first half of pitches
+first_half_pitches <- savant %>%
+  group_by(player_name, pitcher, game_date) %>% 
+  filter(PitchNum <= max(PitchNum) / 2)
+
+# Create a dataframe for the second half of pitches
+second_half_pitches <- savant %>%
+  group_by(player_name, pitcher,game_date) %>% 
+  filter(PitchNum > max(PitchNum) / 2) 
+```
+
+Now have two datasets. One that contains all the pitches that pitchers threw during the first half of their outing(in terms of pitch count) and that of the second half of their outings. This will allow us to compare various statistics such as velocity and spin rate to see if fatigue factors into their outings at all. 
+
+First, we will look at pitchers who see the biggest decrease in the velocity of their fastball.
+```{r}
+#Different pitch type values
+#pitches <- unique(first_half_pitches$pitch_type)
+#pitches
+#Get first half pitching date for fastball only
+FH_FB <- first_half_pitches %>% 
+  filter(pitch_type %in%  c("FF", "SI", "FT", "FC"))
+
+#Get Second half pitching data for fastball only
+SH_FB<- second_half_pitches %>% 
+  filter(pitch_type %in%  c("FF", "SI", "FT", "FC"))
+
+#Now that we have first half pitch outing in one dataframe and second half pitch outing in another dataframe, we need to omit any pitches that have an na value in the release speed variable
+FH_FB <- FH_FB %>% 
+  filter(!is.na(release_speed))
+
+SH_FB <- SH_FB %>% 
+  filter(!is.na(release_speed)) 
+
+#Gets the average pitch speed of each pitcher fastball in the first half
+FasballFH <- FH_FB %>% 
+  group_by(player_name, pitcher) %>% 
+  summarize(pitchesf=n(),
+            avg_Speedf = (sum(release_speed)/pitchesf))
+#Get the average pitch speed of each pitcher fastball in the second half
+FasballSH <- SH_FB %>% 
+  group_by(player_name, pitcher) %>% 
+  summarize(pitchess=n(),
+            avg_Speeds = (sum(release_speed)/pitchess))
+#Get the difference for eac pitcher and then list the top ten
+
+FB_tot <- left_join(FasballFH,
+                                FasballSH,
+                                by=c("player_name","pitcher"))
+Fastball_Diff <- FB_tot %>% 
+  mutate(diff_speed = avg_Speedf-avg_Speeds)
+
+toptenVeloDiff <-Fastball_Diff %>% 
+  arrange(diff_speed) %>%
+  select(pitcher,diff_speed,player_name) %>% 
+  head(100)
+
+topVeloDiff <-Fastball_Diff %>% 
+  arrange(diff_speed) %>%
+  select(pitcher,diff_speed,player_name)
+
+```
+
+
+Next, look at spin rate of first vs second part of pitcher outings for breaking balls
+```{r}
+#Get first half pitching data for curve balls and sliders
+FH_Break <- first_half_pitches %>% 
+  filter(pitch_type %in% c("CU","SL","KC","SV"))
+  
+#Get Second half pitching data for curve balls and sliders
+SH_Break <- second_half_pitches %>% 
+  filter(pitch_type %in% c("CU","SL","KC","SV"))
+
+#Now that we have first half pitch outing in one dataframe and second half pitch outing in another dataframe, we need to omit any pitches that have an na value in the release spin rate variable
+FH_BRK <- FH_Break %>% 
+  filter(!is.na(release_spin_rate))
+
+SH_BRK <- SH_Break %>% 
+  filter(!is.na(release_spin_rate)) 
+
+#Gets the average spin rate of each pitchers Breaking Balls in the first half
+BreakingFH <- FH_BRK %>% 
+  group_by(player_name, pitcher) %>% 
+  summarize(pitchesf=n(),
+            avg_spinRatef= (sum(release_spin_rate)/pitchesf))
+#Get the average spin rate of each pitchers Breaking Balls in the second half
+BreakingSH <- SH_BRK %>% 
+  group_by(player_name, pitcher) %>% 
+  summarize(pitchess=n(),
+            avg_spinRates= (sum(release_spin_rate)/pitchess))
+
+#Get the difference for eac pitcher and then list the top ten
+
+Break_tot <- left_join(BreakingFH,
+                                BreakingSH,
+                                by=c("player_name","pitcher"))
+Spin_Diff <- Break_tot %>% 
+  mutate(diff_spinRate = avg_spinRatef-avg_spinRates)
+
+topSPINten <-Spin_Diff %>% 
+  arrange(diff_spinRate) %>%
+  select(pitcher,diff_spinRate,player_name) %>% 
+  head(100)
+
+topSPIN <-Spin_Diff %>% 
+  arrange(diff_spinRate) %>%
+  select(pitcher,diff_spinRate,player_name)
+
+```
+
+
+```{r}
+
+PDiff <- left_join(topSPINten, toptenVeloDiff,by=c("player_name","pitcher"))
+
+```
+
+Get League average for breaking ball spin rate difference, fastball velocity difference, horizontal movement difference on breaking balls, and vertical movement difference on breaking balls. All for first 
+```{r}
+
+League_avg_SpinRateDiff <- topSPIN %>% 
+  filter(!is.na(diff_spinRate)) %>% 
+  mutate(diff_spinRate=as.numeric(diff_spinRate))
+
+
+League_avg_veloDiff <- mean(topVeloDiff$diff_speed)
+
+League_avg_SpinRateDiff <- mean(League_avg_SpinRateDiff$diff_spinRate)
+
+
+```
+
+
+
+
+```{r}
+savant <- read_csv("./savant_pitch_level.csv")
+
+```
+Evalating Performance with runners on base vs no runners on base
+
+```{r}
+Savant_Real <- savant
+
+Savant_Real$delta_home_run_exp <- as.numeric(as.character(Savant_Real$delta_home_win_exp))
+
+savant <- Savant_Real %>% group_by(player_name, pitcher) %>% summarise(num_pitches = n())
+
+savant <- savant[savant$num_pitches > 1500,]
+
+unsavant <- savant %>% ungroup()
+
+selected_players <- unique(savant$player_name)
+
+filtered_data <- Savant_Real[Savant_Real$player_name %in% selected_players, ]
+
+filtered_data <- semi_join(Savant_Real, savant, by = c("player_name", "pitcher"))
+
+filtered_data <- filtered_data %>% select(estimated_ba_using_speedangle, estimated_woba_using_speedangle, player_name, delta_home_win_exp, delta_run_exp, sp_indicator, rp_indicator, on_1b, on_2b, on_3b)
+
+filtered_data$estimated_ba_using_speedangle <- as.numeric(as.character(filtered_data$estimated_ba_using_speedangle))
+
+filtered_data$estimated_ba_using_speedangle[is.na(filtered_data$estimated_ba_using_speedangle)] <- 0
+
+filtered_data$estimated_woba_using_speedangle <- as.numeric(as.character(filtered_data$estimated_woba_using_speedangle))
+
+filtered_data$estimated_woba_using_speedangle[is.na(filtered_data$estimated_woba_using_speedangle)] <- 0
+
+filtered_data$on_1b <- as.numeric(as.character(filtered_data$on_1b))
+filtered_data$on_1b[is.na(filtered_data$on_1b)] <- 0
+
+filtered_data$on_2b <- as.numeric(as.character(filtered_data$on_2b))
+filtered_data$on_2b[is.na(filtered_data$on_2b)] <- 0
+
+filtered_data$on_3b <- as.numeric(as.character(filtered_data$on_3b))
+filtered_data$on_3b[is.na(filtered_data$on_3b)] <- 0
+
+filtered_data <- filtered_data %>% filter(on_2b != 0 | on_3b != 0)
+
+Pitcher_Data_Bases_On <- filtered_data %>%
+  group_by(player_name, sp_indicator, rp_indicator) %>%
+  summarize(average_estimated_ba_bases_on = mean(estimated_ba_using_speedangle, na.rm = TRUE),
+            average_estimated_woba_bases_on = mean(estimated_woba_using_speedangle, na.rm = TRUE),
+            total_win_exp_added_bases_on = sum(delta_home_win_exp, na.rm = TRUE),
+            total_run_exp_prevented_bases_on = sum(delta_run_exp, na.rm = TRUE))
+
+savant2 <- Savant_Real %>% group_by(player_name, pitcher) %>% summarise(num_pitches = n())
+
+savant2 <- savant2[savant2$num_pitches > 1500,]
+
+unsavant2 <- savant2 %>% ungroup()
+
+selected_players2 <- unique(savant2$player_name)
+
+filtered_data2 <- Savant_Real[Savant_Real$player_name %in% selected_players2, ]
+
+filtered_data2 <- semi_join(Savant_Real, savant2, by = c("player_name", "pitcher"))
+
+filtered_data2 <- filtered_data2 %>% select(estimated_ba_using_speedangle, estimated_woba_using_speedangle, player_name, delta_home_win_exp, delta_run_exp, sp_indicator, rp_indicator, on_1b, on_2b, on_3b)
+
+filtered_data2$estimated_ba_using_speedangle <- as.numeric(as.character(filtered_data2$estimated_ba_using_speedangle))
+
+filtered_data2$estimated_ba_using_speedangle[is.na(filtered_data2$estimated_ba_using_speedangle)] <- 0
+
+filtered_data2$estimated_woba_using_speedangle <- as.numeric(as.character(filtered_data2$estimated_woba_using_speedangle))
+
+filtered_data2$estimated_woba_using_speedangle[is.na(filtered_data2$estimated_woba_using_speedangle)] <- 0
+
+filtered_data2$on_1b <- as.numeric(as.character(filtered_data2$on_1b))
+filtered_data2$on_1b[is.na(filtered_data2$on_1b)] <- 0
+
+filtered_data2$on_2b <- as.numeric(as.character(filtered_data2$on_2b))
+filtered_data2$on_2b[is.na(filtered_data2$on_2b)] <- 0
+
+filtered_data2$on_3b <- as.numeric(as.character(filtered_data2$on_3b))
+filtered_data2$on_3b[is.na(filtered_data2$on_3b)] <- 0
+
+filtered_data2 <- filtered_data2 %>% filter(on_2b == 0 & on_3b == 0)
+
+Pitcher_Data_Bases_Off <- filtered_data2  %>%
+  group_by(player_name, sp_indicator, rp_indicator) %>%
+  summarize(average_estimated_ba_bases_off = mean(estimated_ba_using_speedangle, na.rm = TRUE),
+            average_estimated_woba_bases_off = mean(estimated_woba_using_speedangle, na.rm = TRUE),
+            total_win_exp_added_bases_off = sum(delta_home_win_exp, na.rm = TRUE),
+            total_run_exp_prevented_bases_off = sum(delta_run_exp, na.rm = TRUE))
+
+merged_df <- merge(Pitcher_Data_Bases_On, Pitcher_Data_Bases_Off, by = c("player_name", "sp_indicator", "rp_indicator"))
+merged_df$SPversusRPIndicator <- ifelse(merged_df$sp_indicator == 1, 1, 0)
+
+diff_values <- merged_df$average_estimated_ba_bases_on - merged_df$average_estimated_ba_bases_off
+diff_values2 <- merged_df$average_estimated_woba_bases_on - merged_df$average_estimated_woba_bases_off
+diff_values3 <- merged_df$total_win_exp_added_bases_on - merged_df$total_win_exp_added_bases_off
+diff_values4 <- merged_df$total_run_exp_prevented_bases_on - merged_df$total_run_exp_prevented_bases_off
+
+#ba/woba, more positive, better with bases off, should be starter, more negative, better with bases on, should be reliever
+#win exp - more positive, better with bases on, should be reliever, more negative, better with bases off, should be starter
+#run exp - more positive, better with bases on, should be reliever, more negative, better with bases off, should be starter
+
+Bases_On_Versus_Bases_Off <- data.frame(Players = merged_df$player_name, ba_difference = diff_values, woba_difference = diff_values2, win_exp_difference = diff_values3, run_exp_difference = diff_values4, SPversusRPIndicator = merged_df$SPversusRPIndicator)
+
+mean_base_on_sub_off_win_diff <- mean(Bases_On_Versus_Bases_Off$win_exp_difference, na.rm = TRUE)
+
+mean_base_on_sub_off_woba <- mean(Bases_On_Versus_Bases_Off$woba_difference, na.rm = TRUE)
+
+Bases_On_Versus_Bases_Off_Real <- Bases_On_Versus_Bases_Off %>% arrange(woba_difference)
+
+Bases_On_Versus_Bases_Off_Real_starts <- Bases_On_Versus_Bases_Off %>% filter(SPversusRPIndicator ==0) %>% arrange(woba_difference)
+
+
+top_100_players_bases <- Bases_On_Versus_Bases_Off_Real %>% slice_head(n = 100)
+```
+
+Plotting runners on vs no runners on 
+```{r}
+
+ggplot(merged_df, aes(x = average_estimated_woba_bases_on,
+                      y = average_estimated_woba_bases_off, 
+                      color = factor(SPversusRPIndicator))) +
+  geom_point(size = 3) +
+  geom_text_repel(data = subset(merged_df,
+                                abs(scale(average_estimated_woba_bases_on) > 4) | 
+                                abs(scale(average_estimated_woba_bases_off) > 4)),
+                  aes(x = average_estimated_woba_bases_on,
+                      y = average_estimated_woba_bases_off, 
+                      label = player_name),
+                  size = 3) +
+  labs(title = "Pitchers: xWOBA with RISP vs. xWOBA Without RISP",
+       x = "xWOBA with RISP", 
+       y = "xWOBA without RISP",
+       color = "Role") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        legend.box = "horizontal",      
+        legend.spacing.x = unit(0.2, "cm")) + 
+  scale_color_manual(values = c("#1F78B4", "#33A02C"),
+                     labels = c("SP", "RP"))  
+
+ggplot(merged_df, aes(x = total_win_exp_added_bases_on, y = total_win_exp_added_bases_off, color = factor(SPversusRPIndicator))) +
+  geom_point() +
+  geom_text_repel(data = subset(merged_df,
+                                abs(scale(total_win_exp_added_bases_on)> 4) | 
+                                  abs(scale(total_win_exp_added_bases_off))>4),
+                                aes(x=total_win_exp_added_bases_on,
+                                    y=total_win_exp_added_bases_off, 
+                                    label = player_name))+  
+  labs(title = "Pitchers: Win Expectancy with RISP vs. Win Expectancy Without RISP",
+       x = "Win Expectancy with RISP", 
+       y = "Win Expectancy without RISP",
+       color = "Role") +
+  theme_minimal()
+```
+
+
+Getting Data from fangraphs for model
+```{r}
+
+totals_summary <- fangraphs %>%
+  select(NameASCII, MLBAMID, Role, IP, SO, BB, TBF, FA_pct_sc,
+         Stuff_plus, Location_plus,
+         FC_pct_sc, FS_pct_sc, FO_pct_sc, SI_pct_sc, SL_pct_sc, 
+         CU_pct_sc, KC_pct_sc,EP_pct_sc, CH_pct_sc, SC_pct_sc, KN_pct_sc, ) %>%
+  group_by(NameASCII, MLBAMID, Role) %>%
+  summarise(
+    total_IP = sum(coalesce(IP, 0)),
+    average_K_pct = sum(SO)/sum(TBF),
+    average_BB_pct = sum(BB)/sum(TBF),
+    average_stuff = mean(Stuff_plus),
+    average_loc = mean(Location_plus),
+    average_FA_pct_sc = mean(coalesce(FA_pct_sc, 0)),
+    average_FC_pct_sc = mean(coalesce(FC_pct_sc, 0)),
+    average_FS_pct_sc = mean(coalesce(FS_pct_sc, 0)),
+    average_SI_pct_sc = mean(coalesce(SI_pct_sc, 0)),
+    average_SL_pct_sc = mean(coalesce(SL_pct_sc, 0)),
+    average_CU_pct_sc = mean(coalesce(CU_pct_sc, 0)),
+    average_KC_pct_sc = mean(coalesce(KC_pct_sc, 0)),
+    average_EP_pct_sc = mean(coalesce(EP_pct_sc, 0)),
+    average_CH_pct_sc = mean(coalesce(CH_pct_sc, 0)),
+    ) %>% 
+  mutate(K_sub_BB_pct = average_K_pct-average_BB_pct)
+
+
+qual <- totals_summary %>% filter(total_IP> 90)
+
+
+```
+
+
+Modeling Start: XGBoost
+Goal of model is to predict k-bb percentage. 
+```{r}
+tune_grid <- expand.grid(
+  nrounds = seq(from = 200, to=500, by=50),
+  max_depth = c(2,3,4,5,6),
+  eta = c(0.025,0.05,0.1,0.3),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+tune_control <- caret::trainControl(
+  method = "cv",
+  number = 3,
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgb_tune <- caret::train(
+  K_sub_BB_pct ~ average_loc + average_stuff + average_FA_pct_sc+average_FC_pct_sc + average_FS_pct_sc +
+    average_SI_pct_sc + average_SL_pct_sc+average_CU_pct_sc + average_KC_pct_sc +
+    average_EP_pct_sc+average_CH_pct_sc,
+  data = qual,
+  trControl = tune_control,
+  tuneGrid = tune_grid,
+  method = "xgbTree",
+  verbose = TRUE,
+  na.action = "na.pass",
+  eval_metric = "rmse"
+)
+
+view(xgb_tune$results)
+
+predictions <- predict(xgb_tune, qual, na.action = "na.pass")
+actual <- qual$average_k_BB_pct
+
+```
+
+
+Evluating Model and seeing feature importance
+```{r}
+
+
+# Evaluation metrics
+mae <- mean(abs(predictions - actual))
+mse <- mean((predictions - actual)^2)
+rmse <- sqrt(mse)
+rsquared <- 1 - (sum((actual - predictions)^2) / sum((actual - mean(actual))^2))
+
+
+
+
+# Get feature importance
+importance_matrix <- xgb.importance(model = xgb_tune$finalModel)
+varimp <- importance_matrix$Feature
+
+# Plot feature importance
+xgb.plot.importance(importance_matrix = importance_matrix)
+
+
+```
+
+
+Getting data for Important Players
+```{r}
+
+
+qual$xK_sub_BB_pct <- predict(xgb_tune, qual, na.action = "na.pass")
+
+
+qual$diff_k_to_walk <- qual$xK_sub_BB_pct- qual$K_sub_BB_pct
+
+important <- qual %>% select(NameASCII, Role, xK_sub_BB_pct)
+
+top_3 <- important %>% filter(NameASCII == "Huascar Ynoa" | NameASCII == "Jorge Lopez" | NameASCII == "Matthew Boyd")
+
+top_3$metric <- "xK_sub_BB_pct"
+
+
+```
+
+
+Merging data, to see who performs in multiple of these metrics
+```{r}
+left_and_right
+first_and_multiple
+total
+Fastball_Diff
+Spin_Diff
+Bases_On_Versus_Bases_Off_Real_starts <- Bases_On_Versus_Bases_Off_Real_starts %>% rename(player_name = Players)
+
+
+joined_data <- left_and_right %>%
+  left_join(first_and_multiple, by = "player_name") %>%
+  left_join(total, by = "player_name") %>%
+  left_join(Fastball_Diff, by = "player_name") %>%
+  left_join(Spin_Diff, by = "player_name") %>%
+  left_join(Bases_On_Versus_Bases_Off_Real_starts, by = "player_name")
+
+
+ynoa_only <- joined_data %>% filter(player_name == "Ynoa, Huascar")
+
+boyd_only <- joined_data %>% filter(player_name == "Boyd, Matthew")
+
+lopez_only <- joined_data %>% filter(player_name == "López, Jorge")
+
+
+  
+```
+
+League averages in these metrics and labeling them
+
+```{r}
+LG_AVG <- c(avg_first_sub_multiple_woba, 
+                      mean_L_vs_R_woba,
+                      mean_rest_sub_first15_woba,
+                      League_avg_veloDiff,
+                      League_avg_SpinRateDiff,
+                      mean_base_on_sub_off_win_diff
+                      )
+
+lg_avg_labels <- c("first_sub_multiple_woba", 
+                   "Against Lefties sub against righties woba",
+                   "Rest of game sub first 15 pitches woba",
+                   "Difference in Velocity",
+                   "Difference in spin rate",
+                   "woba diff runners on sub off"
+                   )
+
+
+
+```
+
+
+Themes
+```{r}
+# Custom color palette
+custom_colors <- c("#1F78B4", "#33A02C")
+
+custom_theme <- theme_minimal() +
+  theme(
+    text = element_text(family = "Arial", color = "black"),
+  plot.title = element_text(face = "bold"),
+
+  legend.position = "none",
+  
+  # Panel appearance
+  panel.background = element_rect(fill = "white"),
+  panel.grid.major = element_line(color = "lightgray", size = 0.2),
+  panel.grid.minor = element_line(color = "lightgray", size = 0.2),
+  
+  # Plot-specific elements
+  axis.line = element_line(color = "black"),
+  panel.border = element_rect(color = "black", fill = NA, size = 0.5),
+  strip.background = element_rect(fill = "lightgray", color = "white", size = 1),
+  strip.text = element_text(face = "bold", size = 12, color = "black")
+  )
+
+
+```
+
+
+xk-bb graph
+```{r}
+
+
+ggplot(top_3, aes(x = NameASCII, y = xK_sub_BB_pct, fill = Role)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = sprintf("%.4f", xK_sub_BB_pct), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Expected K-BB Rate By Player and Role", 
+       subtitle = "Predicted used Stuff+, Location+, and pitch usage ",
+       x = "Player", 
+       y = "xK-BB Rate") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme +
+  theme(legend.position = "right")
+
+  
+```
+
+
+Huascar Ynoa Graphs
+```{r}
+
+Huascar_Ynoa <- c(ynoa_only$first_sub_multiple_woba, 
+                ynoa_only$left_right_woba, 
+                ynoa_only$rest_sub_first15_woba,
+                ynoa_only$diff_speed,
+                ynoa_only$diff_spinRate,
+                ynoa_only$woba_difference
+                )
+
+ynoa_all <- data.frame(labels = lg_avg_labels,
+                 League_Average = LG_AVG,
+                 Huascar_Ynoa = Huascar_Ynoa)
+
+ynoa_all <- tidyr::gather(ynoa_all, key = "Player", value = "value", -labels)
+
+ynoa_all <- ynoa_all %>% arrange(desc(labels))
+
+ynoa_all$Player <- factor(ynoa_all$Player, levels = c("Huascar_Ynoa", "League_Average"))
+
+
+```
+
+```{r}
+
+ynoa_runners <- ggplot(ynoa_all[1:2,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff xwOBA With Runners On vs Runners Off", 
+       subtitle = "Neg Val -> Better Performance with Runners On",
+       x = "Player", 
+       y = "Diff in xwOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+
+ynoa_FS <- ggplot(ynoa_all[3:4,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in wOBA Against for 2nd+ time in a Game vs 1st", 
+       subtitle = "Neg Val -> Better Performance Against Hitters 1st Time",
+       x = "Player", 
+       y = "Diff in wOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+ynoa_F15 <- ggplot(ynoa_all[5:6,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in wOBA Against 1st 15 Pitches vs Rest of Game", 
+       subtitle = "Neg Val -> Worse Performance in the Remainder of Game",
+       x = "Player", 
+       y = "Difference in wOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+ynoa_LR <- ggplot(ynoa_all[11:12,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in wOBA Against Lefties vs Against Righties", 
+       subtitle = "Neg Val -> Better Performance Against Lefties",
+       x = "Player", 
+       y = "Diff in wOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+ynoa_SR <- ggplot(ynoa_all[7:8,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in Spin Rate in First vs Second Half of Game", 
+       subtitle = "Neg Val -> Lower Spin Rate in Second Half of Game",
+       x = "Player", 
+       y = "Diff in Spin Rate (RPM)") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+ynoa_FV <- ggplot(ynoa_all[9:10,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in FB Velocity in First vs Second Half of Game", 
+       subtitle = "Neg Val -> Lower FB Velocity in Second Half of Game",
+       x = "Player", 
+       y = "Diff in Fastball Velocity (MPH)") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+```
+
+
+Matthew Boyd Graphs
+```{r}
+
+
+Matthew_Boyd <- c(boyd_only$first_sub_multiple_woba, 
+                boyd_only$left_right_woba, 
+                boyd_only$rest_sub_first15_woba,
+                boyd_only$diff_speed,
+                boyd_only$diff_spinRate,
+                boyd_only$woba_difference
+                )
+
+boyd_all <- data.frame(labels = lg_avg_labels,
+                 League_Average = LG_AVG,
+                 Matthew_Boyd = Matthew_Boyd)
+
+boyd_all <- tidyr::gather(boyd_all, key = "Player", value = "value", -labels)
+
+boyd_all <- boyd_all %>% arrange(desc(labels))
+
+boyd_all$Player <- factor(boyd_all$Player, levels = c("Matthew_Boyd", "League_Average"))
+
+
+```
+
+```{r}
+
+boyd_runners <- ggplot(boyd_all[1:2,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff xwOBA With Runners On vs Runners Off", 
+       subtitle = "Neg Val -> Better Performance with Runners On",
+       x = "Player", 
+       y = "Diff in xwOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+
+boyd_FS <- ggplot(boyd_all[3:4,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in wOBA Against for 2nd+ time in a Game vs 1st", 
+       subtitle = "Neg Val -> Better Performance Against Hitters 1st Time",
+       x = "Player", 
+       y = "Diff in wOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+boyd_F15 <- ggplot(boyd_all[5:6,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in wOBA Against in First 15 Pitches vs Remainder of Game", 
+       subtitle = "Neg Val -> Worse Performance in the Remainder of Game",
+       x = "Player", 
+       y = "Difference in wOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+boyd_LR <- ggplot(boyd_all[11:12,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in wOBA Against Lefties vs Against Righties", 
+       subtitle = "Neg Val -> Better Performance Against lefties",
+       x = "Player", 
+       y = "Diff in wOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+boyd_SR <- ggplot(boyd_all[7:8,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in Spin Rate in First vs Second Half of Game", 
+       subtitle = "Neg Val -> Lower Spin Rate in Second Half of Game",
+       x = "Player", 
+       y = "Diff in Spin Rate (RPM)") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+boyd_FV <- ggplot(boyd_all[9:10,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in FB Velocity in First vs Second Half of Game", 
+       subtitle = "Neg Val -> Lower FB Velocity in Second Half of Game",
+       x = "Player", 
+       y = "Diff in Fastball Velocity (MPH)") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+```
+
+
+Jorge Lopez Graphs
+```{r}
+Jorge_Lopez <- c(lopez_only$first_sub_multiple_woba, 
+                lopez_only$left_right_woba, 
+                lopez_only$rest_sub_first15_woba,
+                lopez_only$diff_speed,
+                lopez_only$diff_spinRate,
+                lopez_only$woba_difference
+                )
+
+
+lopez_all <- data.frame(labels = lg_avg_labels,
+                 League_Average = LG_AVG,
+                 Jorge_Lopez = Jorge_Lopez)
+
+lopez_all <- tidyr::gather(lopez_all, key = "Player", value = "value", -labels)
+
+lopez_all <- lopez_all %>% arrange(desc(labels))
+
+lopez_all$Player <- factor(lopez_all$Player, levels = c("Jorge_Lopez", "League_Average"))
+
+
+```
+
+```{r}
+
+lopez_runners <- ggplot(lopez_all[1:2,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff xwOBA With Runners On vs Runners Off", 
+       subtitle = "Neg Val -> Better Performance with Runners On",
+       x = "Player", 
+       y = "Diff in xwOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+
+lopez_FS <- ggplot(lopez_all[3:4,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in wOBA Against for 2nd+ time in a Game vs 1st", 
+       subtitle = "Neg Val -> Better Performance Against Hitters 1st Time",
+       x = "Player", 
+       y = "Diff in wOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+lopez_F15 <- ggplot(lopez_all[5:6,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in wOBA Against in First 15 Pitches vs Remainder of Game", 
+       subtitle = "Neg Val -> Worse Performance in the Remainder of Game",
+       x = "Player", 
+       y = "Difference in wOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+lopez_LR <- ggplot(lopez_all[11:12,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in wOBA Against Lefties vs Against Righties", 
+       subtitle = "Neg Val -> Better Performance Against Lefties",
+       x = "Player", 
+       y = "Diff in wOBA Against") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+lopez_SR <- ggplot(lopez_all[7:8,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in Spin Rate in First vs Second Half of Game", 
+       subtitle = "Neg Val -> Lower Spin Rate in Second Half of Game",
+       x = "Player", 
+       y = "Diff in Spin Rate (RPM)") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+lopez_FV <- ggplot(lopez_all[9:10,], aes(x = Player, y = value, fill = Player)) + 
+  geom_bar(stat = "identity", position = "dodge") + 
+  geom_text(aes(label = sprintf("%.4f", value), vjust = -0.5), size = 3.5, position = position_dodge(width = 0.9)) +
+  labs(title = "Diff in FB Velocity in First vs Second Half of Game", 
+       subtitle = "Neg Val -> Lower FB Velocity in Second Half of Game",
+       x = "Player", 
+       y = "Diff in Fastball Velocity (MPH)") +
+  scale_fill_manual(values = custom_colors) +
+  custom_theme
+
+
+```
+
+
+Putting Graphs together and exporting them
+```{r}
+
+professional_theme <- theme(
+  plot.background = element_rect(fill = "lightgray"),
+  panel.background = element_rect(fill = "white"),
+  plot.margin = margin(10, 10, 10, 10),
+  legend.position = "none",
+  panel.grid.major = element_line(color = "lightgray", size = 0.2),
+  panel.grid.minor = element_line(color = "lightgray", size = 0.2),
+  panel.border = element_rect(color = "black", fill = NA, size = 0.5),
+  strip.background = element_rect(fill = "lightgray", color = "white", size = 1),
+  strip.text = element_text(face = "bold", size = 12, color = "black")
+)
+
+
+
+combo_ynoa <- ggarrange(ynoa_LR, ynoa_FS, ynoa_F15, ynoa_runners, ynoa_SR, ynoa_FV, nrow = 2, ncol = 3)
+
+
+combo_ynoa <- annotate_figure(combo_ynoa, top = text_grob("Huascar Ynoa vs. League Average", 
+               color = "black", face = "bold",size = 18))
+
+combo_ynoa <- combo_ynoa + professional_theme
+
+ggsave("./graphs_ynoa.png", combo_ynoa, width = 20, height = 9, units = "in", dpi = 300)
+
+
+
+
+combo_boyd <- ggarrange(boyd_LR,boyd_FS, boyd_F15, boyd_runners, boyd_SR, boyd_FV, nrow = 2, ncol = 3)
+
+
+combo_boyd <- annotate_figure(combo_boyd, top = text_grob("Matthew Boyd vs. League Average", 
+               color = "black", face = "bold", size = 14)) + theme(panel.background = element_rect(fill = "white"))
+
+combo_boyd <- combo_boyd + professional_theme
+
+
+ggsave("./graphs_boyd.png", combo_boyd, width = 20, height = 9, units = "in", dpi = 300)
+
+
+
+combo_lopez <- ggarrange(lopez_LR,lopez_FS, lopez_F15, lopez_runners, lopez_SR, lopez_FV, nrow = 2, ncol = 3)
+
+
+combo_lopez <- annotate_figure(combo_lopez, top = text_grob("Jorge Lopez vs. League Average", 
+               color = "black", face = "bold", size = 14)) + theme(panel.background = element_rect(fill = "white"))
+
+combo_lopez <- combo_lopez + professional_theme
+
+
+ggsave("./graphs_lopez.png", combo_lopez, width = 20, height = 9, units = "in", dpi = 300)
+
+
+```
