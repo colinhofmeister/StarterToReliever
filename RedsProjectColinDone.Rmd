@@ -1,4 +1,4 @@
-This is the part of the project that I specifically worked on. I analyzed which starters were good in the first 15 pitches of an outing compared to the rest of their outing, looking for pitchers who would start well and fall off as time passed because those players would likely fare better in the bullpen.
+#This is the part of the project that I specifically worked on. I analyzed which starters were good in the first 15 pitches of an outing compared to the rest of their outing, looking for pitchers who would start well and fall off as time passed because those players would likely fare better in the bullpen.
 
 ---
 title: "Reds"
